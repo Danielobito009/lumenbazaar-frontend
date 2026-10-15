@@ -545,3 +545,194 @@ Parts:
 Completion check:
 
 - The frontend can evolve without drifting from backend, docs, and contract behavior.
+
+
+## Phase 39: Receipt Evidence Verification (Completed)
+
+### Overview
+
+Receipt evidence verification ensures that a settlement receipt presented to the user matches the original payment terms they approved. This prevents scenarios where a malicious or faulty backend could swap payment details mid-transaction.
+
+### Key Principles
+
+1. **Non-Sensitive Storage**: Persist only the approved payment terms (identifiers, amounts, networks) in sessionStorage—never store signatures, private keys, or complete signed payloads.
+2. **Field-by-Field Validation**: Compare each critical payment term independently against the receipt.
+3. **Explicit Indeterminate State**: Any mismatch immediately triggers an explicit "indeterminate" security state—confirmation is impossible if evidence disagrees.
+4. **User Visibility**: Display validation errors prominently as security warnings so users can investigate mismatches.
+
+### Payment Terms Persisted
+
+The system persists all seven critical payment terms in the recovery record:
+
+| Term | Stored In | Compared At | Purpose |
+|------|-----------|------------|---------|
+| **Network** | `recovery.network` | Receipt validation | Ensures payment on correct blockchain |
+| **Asset Code** | `recovery.assetCode` | Receipt validation | Ensures correct token is paid |
+| **Asset Issuer** | `recovery.assetIssuer` | Receipt validation | Identifies token issuer address |
+| **Amount** | `recovery.amount` | Receipt validation | Confirms correct payment amount |
+| **Recipient** (payTo) | `recovery.payTo` | Recovery record | Ensures funds go to intended seller |
+| **Payment Attempt ID** | `recovery.paymentAttemptId` | Settlement & receipt validation | Tracks payment through backend |
+| **Correlation ID** | `recovery.correlationId` | Settlement & receipt validation | Correlates verify → settle → receipt flow |
+
+### Implementation Details
+
+#### Recovery Record Schema
+
+```typescript
+const recoverySchema = z.object({
+  amount: z.string().regex(/^[1-9]\d*$/),           // Atomic amount (stroops)
+  assetCode: z.string().min(1),                      // Asset code (e.g., "USDC")
+  assetIssuer: z.string().min(1),                    // Asset issuer address or contract ID
+  correlationId: z.string().min(1),                  // Verification → settlement correlation
+  network: z.literal("stellar:testnet"),             // Network identifier
+  paymentAttemptId: z.string().min(1),               // Unique payment identifier
+  payTo: z.string().min(1),                          // Intended recipient address
+  receiptId: z.string().min(1).optional(),           // Set after settlement submission
+  resourceId: z.string().min(1),                     // Resource being paid for
+  stage: z.enum(["verified", "submitted"]),         // Payment stage
+  transactionHash: z.string().min(1).optional(),     // Set after successful settlement
+  updatedAt: z.string().datetime()                   // Last update timestamp
+});
+```
+
+Recovery records are stored in `sessionStorage` under keys like `lumenbazaar:payment-recovery:${resourceId}`. The storage is cleared:
+- After successful settlement confirmation
+- On explicit settlement failures
+- On browser close (session scope)
+
+#### Validation Function
+
+`validateReceiptEvidence(receipt, recovery)` performs field-by-field comparison:
+
+```
+Receipt Identifier Validation:
+├─ receipt.id matches recovery.receiptId
+├─ receipt.paymentAttemptId matches recovery.paymentAttemptId
+└─ receipt.correlationId matches recovery.correlationId
+
+Network Validation:
+└─ receipt.network matches recovery.network
+
+Payment Terms Validation:
+├─ receipt.amount matches recovery.amount
+├─ receipt.assetCode matches recovery.assetCode
+└─ receipt.assetIssuer matches recovery.assetIssuer
+
+Recipient Validation:
+└─ receipt.sellerId is present and represents intended recipient
+
+Resource Validation:
+└─ receipt.resourceId matches recovery.resourceId (if present)
+
+Transaction Lineage Validation:
+└─ receipt.transactionHash matches recovery.transactionHash (if present)
+```
+
+Each mismatch generates an explicit error message:
+- "Amount mismatch: expected 500000, got 600000"
+- "Asset code mismatch: expected USDC, got USDT"
+- "Network mismatch: expected stellar:testnet, got stellar:public"
+
+#### Outcome State Management
+
+When `outcomeFromReceipt()` is called:
+
+1. **Validation Phase**: Run `validateReceiptEvidence()` first
+   - If errors detected: return `{ state: "indeterminate", validationErrors: [...] }`
+   - Prevents confirmation state if any evidence disagrees
+
+2. **Status Phase**: Check receipt status only after validation passes
+   - `status === "failed"` → `{ state: "rejected" }`
+   - `status === "pending"` → `{ state: "pending" }`
+   - `status === "finalized"` + ledger → `{ state: "confirmed" }`
+
+### UI/UX Updates
+
+#### PaymentOutcome Component
+
+When `outcome.validationErrors` is present, an amber warning alert displays:
+
+```tsx
+{hasValidationErrors && (
+  <div role="alert" className="bg-amber-50 border-amber-200">
+    <h3>Receipt evidence validation warnings</h3>
+    <ul>
+      {outcome.validationErrors.map(error => (
+        <li key={error}>{error}</li>
+      ))}
+    </ul>
+  </div>
+)}
+```
+
+Enhanced receipt details display:
+- **Receipt ID**: Full ID with text wrapping
+- **Receipt Status**: pending | finalized | failed
+- **Ledger**: Ledger number or "Pending"
+- **Amount**: Payment amount
+- **Asset**: Asset code
+- **Network**: Network identifier
+
+### Test Coverage
+
+Comprehensive test suite in `paid-flow.test.ts` with 8 focused tests:
+
+1. ✅ Amount mismatch → indeterminate
+2. ✅ Asset code mismatch → indeterminate
+3. ✅ Asset issuer mismatch → indeterminate
+4. ✅ Network mismatch → indeterminate
+5. ✅ Resource ID mismatch → indeterminate
+6. ✅ Payment attempt ID mismatch → indeterminate
+7. ✅ Correlation ID mismatch → indeterminate
+8. ✅ Transaction hash mismatch → indeterminate
+
+Each test:
+- Mutates a single field independently
+- Verifies indeterminate state is returned
+- Confirms detailed error message is present
+- Uses helper functions for consistent setup
+
+### Security Constraints
+
+1. **No Signature Storage**: Authorization payloads are never persisted
+2. **No Private Key Storage**: Wallet operations are delegated to Freighter
+3. **No Complete Payloads**: Recovery stores only identifiers and terms
+4. **Testnet Only**: Currently limited to `stellar:testnet`
+5. **Fail Closed**: Any validation error blocks confirmation
+
+### Error Messages for Debugging
+
+Error messages are specific but don't expose backend internals:
+
+✅ **User-Facing**:
+- "Amount mismatch: expected 500000, got 600000"
+- "Network mismatch: expected stellar:testnet, got stellar:public"
+
+❌ **Avoid Exposing**:
+- Full request/response bodies
+- API endpoint URLs
+- Backend version or service names
+- Stack traces or SQL queries
+
+### Browser Compatibility
+
+Recovery records use `sessionStorage` (supported in all modern browsers):
+- Desktop: Chrome, Firefox, Safari, Edge
+- Mobile: Chrome, Safari (iOS 5+)
+- Falls back gracefully to `null` in SSR contexts
+
+### Known Limitations
+
+1. Asset code derivation requires optional `resourceAssetCode`/`resourceAssetIssuer` parameters in `ExecutePaidFlowInput`—default to generic values if not provided
+2. `payTo` comparison is implicit (checked only for `sellerId` presence in receipt)
+3. Only one unresolved payment attempt per resource (sessionStorage key scoped to resourceId)
+4. No recovery across browser sessions (sessionStorage cleared on close)
+
+### Future Enhancements
+
+1. **Cross-Session Recovery**: Persist recovery metadata with encryption (localStorage + vault)
+2. **Mainnet Support**: Extend network validation beyond testnet
+3. **Signature Verification**: Include challenge fingerprint validation for replay detection
+4. **Audit Logging**: Store anonymized validation events for fraud detection
+5. **Batch Validation**: Handle multiple concurrent payment attempts
+

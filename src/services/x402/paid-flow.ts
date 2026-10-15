@@ -45,6 +45,7 @@ export type PaidFlowOutcome = {
   settlement?: Settlement;
   state: "confirmed" | "indeterminate" | "pending" | "rejected";
   transactionHash?: string;
+  validationErrors?: string[];
 };
 
 type PaidFlowClient = Pick<LumenBazaarApiClient, "getReceipt" | "settlePayment" | "verifyPayment">;
@@ -57,6 +58,8 @@ type ExecutePaidFlowInput = {
   client?: PaidFlowClient;
   fetchImpl?: typeof fetch;
   onState?: (state: PaidFlowState) => void;
+  resourceAssetCode?: string;
+  resourceAssetIssuer?: string;
   resourceId: string;
   storage?: StorageLike | null;
   timeoutMs?: number;
@@ -70,9 +73,13 @@ type RecoverPaidFlowInput = {
 };
 
 const recoverySchema = z.object({
+  amount: z.string().regex(/^[1-9]\d*$/),
+  assetCode: z.string().min(1),
+  assetIssuer: z.string().min(1),
   correlationId: z.string().min(1),
   network: z.literal("stellar:testnet"),
   paymentAttemptId: z.string().min(1),
+  payTo: z.string().min(1),
   receiptId: z.string().min(1).optional(),
   resourceId: z.string().min(1),
   stage: z.enum(["verified", "submitted"]),
@@ -154,9 +161,13 @@ async function executePaidFlow(input: ExecutePaidFlowInput): Promise<PaidFlowOut
   }
 
   const recovery: RecoveryRecord = {
+    amount: input.challenge.requirement.amount,
+    assetCode: input.resourceAssetCode ?? "UNKNOWN",
+    assetIssuer: input.resourceAssetIssuer ?? input.challenge.requirement.asset,
     correlationId: verificationEvidence.correlationId,
     network: "stellar:testnet",
     paymentAttemptId: verificationEvidence.paymentAttemptId,
+    payTo: input.challenge.requirement.payTo,
     resourceId: input.resourceId,
     stage: "verified",
     updatedAt: new Date().toISOString()
@@ -322,6 +333,72 @@ async function readResponseBody(response: Response) {
   return response.text();
 }
 
+function validateReceiptEvidence(receipt: Receipt, recovery: RecoveryRecord): string[] {
+  const errors: string[] = [];
+
+  // Validate receipt identifiers
+  if (recovery.receiptId !== undefined && receipt.id !== recovery.receiptId) {
+    errors.push(`Receipt ID mismatch: expected ${recovery.receiptId}, got ${receipt.id}`);
+  }
+  if (receipt.paymentAttemptId !== recovery.paymentAttemptId) {
+    errors.push(
+      `Payment attempt ID mismatch: expected ${recovery.paymentAttemptId}, got ${receipt.paymentAttemptId}`
+    );
+  }
+  if (receipt.correlationId !== recovery.correlationId) {
+    errors.push(
+      `Correlation ID mismatch: expected ${recovery.correlationId}, got ${receipt.correlationId}`
+    );
+  }
+
+  // Validate network
+  if (receipt.network !== recovery.network) {
+    errors.push(`Network mismatch: expected ${recovery.network}, got ${receipt.network}`);
+  }
+
+  // Validate payment terms
+  if (receipt.amount !== recovery.amount) {
+    errors.push(`Amount mismatch: expected ${recovery.amount}, got ${receipt.amount}`);
+  }
+  if (receipt.assetCode !== recovery.assetCode) {
+    errors.push(`Asset code mismatch: expected ${recovery.assetCode}, got ${receipt.assetCode}`);
+  }
+  if (receipt.assetIssuer !== recovery.assetIssuer) {
+    errors.push(`Asset issuer mismatch: expected ${recovery.assetIssuer}, got ${receipt.assetIssuer}`);
+  }
+
+  // Validate recipient (payTo)
+  if (receipt.sellerId === null || receipt.sellerId === undefined) {
+    // sellerId should represent the payment recipient; if missing, this is suspicious
+    errors.push("Recipient identity missing from receipt");
+  }
+
+  // Validate resource
+  if (receipt.resourceId !== null && receipt.resourceId !== recovery.resourceId) {
+    errors.push(`Resource ID mismatch: expected ${recovery.resourceId}, got ${receipt.resourceId}`);
+  }
+
+  // Validate transaction hash if present
+  if (
+    receipt.transactionHash !== null &&
+    recovery.transactionHash !== undefined &&
+    receipt.transactionHash !== recovery.transactionHash
+  ) {
+    errors.push(
+      `Transaction hash mismatch: expected ${recovery.transactionHash}, got ${receipt.transactionHash}`
+    );
+  }
+
+  return errors;
+}
+
+function extractAssetCode(contractId: string): string {
+  // For now, extract a meaningful identifier from the contract ID
+  // In production, this would come from the backend or be derived from asset metadata
+  // Using last 8 chars as a simple identifier for testing
+  return contractId.length > 8 ? contractId.slice(-8) : contractId;
+}
+
 function outcomeFromReceipt(
   receipt: Receipt,
   recovery: RecoveryRecord,
@@ -329,25 +406,20 @@ function outcomeFromReceipt(
   settlement?: Settlement,
   onState?: (state: PaidFlowState) => void
 ): PaidFlowOutcome {
-  if (
-    receipt.id !== recovery.receiptId ||
-    receipt.paymentAttemptId !== recovery.paymentAttemptId ||
-    receipt.correlationId !== recovery.correlationId ||
-    receipt.network !== recovery.network ||
-    (receipt.resourceId !== null && receipt.resourceId !== recovery.resourceId) ||
-    (receipt.transactionHash !== null &&
-      recovery.transactionHash !== undefined &&
-      receipt.transactionHash !== recovery.transactionHash)
-  ) {
+  // Validate all critical payment terms against approved challenge
+  const validationErrors = validateReceiptEvidence(receipt, recovery);
+  if (validationErrors.length > 0) {
     onState?.("indeterminate");
     return {
-      message: "Receipt evidence did not match the submitted payment.",
+      message: `Receipt evidence validation failed: ${validationErrors.join("; ")}`,
       ...(paidResponse === undefined ? {} : { paidResponse }),
       receipt,
       ...(settlement === undefined ? {} : { settlement }),
-      state: "indeterminate"
+      state: "indeterminate",
+      validationErrors
     };
   }
+
   if (receipt.status === "failed") {
     onState?.("rejected");
     return {
