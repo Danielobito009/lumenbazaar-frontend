@@ -12,6 +12,21 @@ export type WalletConnectionState = {
   walletName?: string;
 };
 
+export type WalletOutcomeType =
+  | "success"
+  | "rejected"
+  | "timeout"
+  | "unavailable"
+  | "network_mismatch"
+  | "malformed_signature";
+
+export type WalletOutcome = {
+  type: WalletOutcomeType;
+  message?: string;
+  retryable: boolean;
+  errorCode?: string;
+};
+
 export const initialWalletState: WalletConnectionState = {
   expectedNetwork: "stellar:testnet",
   expectedPassphrase: getNetworkConfig("stellar:testnet").passphrase,
@@ -88,6 +103,55 @@ export function isNetworkMismatch(
   expectedPassphrase: string
 ) {
   return actualPassphrase !== undefined && actualPassphrase !== expectedPassphrase;
+}
+
+export function mapAuthorizationErrorToOutcome(errorCode: string): WalletOutcome {
+  switch (errorCode) {
+    case "WALLET_REJECTED":
+      return {
+        type: "rejected",
+        message: "You declined the payment authorization.",
+        retryable: true,
+        errorCode
+      };
+    case "WALLET_TIMEOUT":
+    case "WALLET_SIGNING_TIMEOUT":
+      return {
+        type: "timeout",
+        message: "The wallet signing request timed out. Please try again.",
+        retryable: true,
+        errorCode
+      };
+    case "WALLET_UNAVAILABLE":
+      return {
+        type: "unavailable",
+        message: "The wallet extension is not available.",
+        retryable: true,
+        errorCode
+      };
+    case "SIGNATURE_INVALID":
+    case "WALLET_MALFORMED_SIGNATURE":
+      return {
+        type: "malformed_signature",
+        message: "The wallet returned an invalid signature. Please try again.",
+        retryable: true,
+        errorCode
+      };
+    case "WALLET_NETWORK_MISMATCH":
+      return {
+        type: "network_mismatch",
+        message: "The wallet is on a different network. Please switch to Stellar testnet.",
+        retryable: false,
+        errorCode
+      };
+    default:
+      return {
+        type: "unavailable",
+        message: "An unexpected wallet error occurred.",
+        retryable: true,
+        errorCode
+      };
+  }
 }
 
 async function initializeWalletKit(expectedNetwork: NetworkId) {
