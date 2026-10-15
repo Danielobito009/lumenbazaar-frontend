@@ -230,15 +230,43 @@ export function PaymentChallengePanel({ resource, source }: PaymentChallengePane
 function PaymentOutcome({ outcome }: { outcome: PaidFlowOutcome }) {
   const transactionHash = outcome.transactionHash;
   const network = outcome.receipt?.network ?? outcome.settlement?.network;
+  const hasValidationErrors = (outcome.validationErrors?.length ?? 0) > 0;
 
   return (
     <div className="space-y-4 border-t border-slate-200 pt-4">
       <p className="text-sm leading-6 text-slate-700">{outcome.message}</p>
+
+      {hasValidationErrors ? (
+        <div
+          className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800"
+          role="alert"
+        >
+          <h3 className="mb-2 font-semibold">Receipt evidence validation warnings</h3>
+          <ul className="space-y-1">
+            {outcome.validationErrors?.map((error, index) => (
+              <li key={index} className="flex items-start gap-2">
+                <span className="mt-0.5 inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full bg-amber-600" />
+                <span>{error}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {outcome.receipt !== undefined ? (
         <dl className="grid gap-4 text-sm md:grid-cols-2 xl:grid-cols-3">
           <Field label="Receipt" value={outcome.receipt.id} wrap />
           <Field label="Receipt status" value={outcome.receipt.status} />
           <Field label="Ledger" value={String(outcome.receipt.ledger ?? "Pending")} />
+          {outcome.receipt.amount !== undefined ? (
+            <Field label="Amount" value={outcome.receipt.amount} />
+          ) : null}
+          {outcome.receipt.assetCode !== undefined ? (
+            <Field label="Asset" value={outcome.receipt.assetCode} />
+          ) : null}
+          {outcome.receipt.network !== undefined ? (
+            <Field label="Network" value={outcome.receipt.network} />
+          ) : null}
         </dl>
       ) : null}
       {transactionHash !== undefined && network !== undefined ? (

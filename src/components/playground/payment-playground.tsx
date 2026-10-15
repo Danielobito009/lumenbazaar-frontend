@@ -38,6 +38,7 @@ import {
 } from "@/services/playground";
 import { explorerTransactionUrl, shortHash } from "@/services/payments";
 import { normalizeUiError, redactSensitivePaymentData } from "@/services/ui-state";
+import { checkPaymentPreflight, type PreflightCheckError } from "@/services/stellar/preflight";
 
 export function PaymentPlayground() {
   if (!isDemoMode(loadRuntimeConfig().environment)) {
@@ -66,8 +67,9 @@ function DemoPaymentPlayground() {
   const [paymentRequest, setPaymentRequest] = useState<PaymentPayload | null>(null);
   const [verification, setVerification] = useState<PaymentVerification | null>(null);
   const [settlement, setSettlement] = useState<Settlement | null>(null);
-  const [error, setError] = useState<{ code: string; message: string } | null>(null);
-  const [busy, setBusy] = useState<"verify" | "settle" | null>(null);
+  const [error, setError] = useState<{ code: string; message: string; retryable?: boolean } | null>(null);
+  const [preflightError, setPreflightError] = useState<PreflightCheckError | null>(null);
+  const [busy, setBusy] = useState<"verify" | "settle" | "preflight" | null>(null);
   const resource = useMemo<Resource>(
     () => demoResources.find((item) => item.id === selectedResourceId) ?? demoResources[0]!,
     [selectedResourceId]
@@ -85,7 +87,35 @@ function DemoPaymentPlayground() {
     setVerification(null);
     setSettlement(null);
     setError(null);
+    setPreflightError(null);
     return nextRequest;
+  }
+
+  async function runPreflightCheck(publicKey: string) {
+    setBusy("preflight");
+    setPreflightError(null);
+    setError(null);
+
+    try {
+      const result = await checkPaymentPreflight({
+        assetCode: resource.assetCode,
+        assetIssuer: resource.assetIssuer,
+        fetchImpl: fetch,
+        network: resource.network,
+        publicKey,
+        requiredAmount: buildPlaygroundPaymentRequest(resource).paymentRequirements.amount
+      });
+
+      if (!result.success) {
+        setPreflightError(result.error);
+      } else {
+        setPreflightError(null);
+      }
+    } catch (caught) {
+      setError(normalizePlaygroundError(caught));
+    } finally {
+      setBusy(null);
+    }
   }
 
   function runSimulatedVerify() {
@@ -250,6 +280,64 @@ function DemoPaymentPlayground() {
               )}
             </CardBody>
           </Card>
+
+          <Card>
+            <CardHeader>
+              <h2 className="text-lg font-semibold text-slate-950">Preflight Check</h2>
+            </CardHeader>
+            <CardBody className="space-y-4">
+              <p className="text-sm text-slate-600">
+                Enter a Stellar public key to validate that the account has the required trustline and sufficient balance before payment.
+              </p>
+              <div className="space-y-3">
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-slate-700">Public Key (G...)</span>
+                  <input
+                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-100"
+                    id="payer-public-key"
+                    placeholder="GBBD47UZQ...53GGVS7N"
+                    type="text"
+                  />
+                </label>
+                <Button
+                  disabled={busy === "preflight"}
+                  onClick={() => {
+                    const input = document.getElementById("payer-public-key") as HTMLInputElement;
+                    if (input.value.trim()) {
+                      void runPreflightCheck(input.value.trim());
+                    }
+                  }}
+                  type="button"
+                  variant="secondary"
+                >
+                  <ShieldCheck aria-hidden="true" className="h-4 w-4" />
+                  {busy === "preflight" ? "Checking..." : "Check Account"}
+                </Button>
+              </div>
+
+              {preflightError ? (
+                <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 text-amber-700" />
+                    <div className="flex-1">
+                      <Badge tone="warning">{preflightError.code}</Badge>
+                      <p className="mt-2 text-sm leading-6 text-amber-800">{preflightError.message}</p>
+                      {preflightError.code === "TRUSTLINE_REQUIRED" && (
+                        <p className="mt-2 text-xs text-amber-700">
+                          Asset: {preflightError.assetCode} ({preflightError.assetIssuer})
+                        </p>
+                      )}
+                      {preflightError.code === "INSUFFICIENT_BALANCE" && (
+                        <p className="mt-2 text-xs text-amber-700">
+                          Balance: {preflightError.currentBalance} / Required: {preflightError.requiredAmount}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </CardBody>
+          </Card>
         </div>
 
         <div className="space-y-5">
@@ -333,9 +421,14 @@ function DemoPaymentPlayground() {
                 <div className="rounded-md border border-red-200 bg-red-50 p-3">
                   <div className="flex items-start gap-2">
                     <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 text-red-700" />
-                    <div>
+                    <div className="flex-1">
                       <Badge tone="danger">{error.code}</Badge>
                       <p className="mt-2 text-sm leading-6 text-red-800">{error.message}</p>
+                      {error.retryable ? (
+                        <p className="mt-2 text-xs text-red-700">This error is retryable. Focus returns to the payment control.</p>
+                      ) : (
+                        <p className="mt-2 text-xs text-red-700">This error requires user action before retry.</p>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -411,8 +504,20 @@ function normalizePlaygroundError(error: unknown) {
     title: "Payment request failed"
   });
 
+  // Determine if error is retryable based on error code
+  const retryableErrors = [
+    "WALLET_REJECTED",
+    "WALLET_TIMEOUT",
+    "WALLET_SIGNING_TIMEOUT",
+    "WALLET_UNAVAILABLE",
+    "SIGNATURE_INVALID",
+    "WALLET_MALFORMED_SIGNATURE"
+  ];
+  const isRetryable = retryableErrors.includes(state.code);
+
   return {
     code: state.code,
-    message: state.description
+    message: state.description,
+    retryable: isRetryable
   };
 }

@@ -173,6 +173,128 @@ describe("paid resource flow", () => {
     expect(client.getReceipt).toHaveBeenCalledTimes(0);
   });
 
+  it("returns indeterminate when receipt amount does not match approved payment", async () => {
+    const client = successfulClient({
+      getReceipt: vi.fn(async () => receipt({ amount: "600000" }))
+    });
+    const result = await execute(client);
+
+    expect(result).toMatchObject({
+      state: "indeterminate",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("Amount mismatch")
+      ])
+    });
+  });
+
+  it("returns indeterminate when receipt asset code does not match approved payment", async () => {
+    const client = successfulClient({
+      getReceipt: vi.fn(async () => receipt({ assetCode: "USDT" }))
+    });
+    const result = await execute(client);
+
+    expect(result).toMatchObject({
+      state: "indeterminate",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("Asset code mismatch")
+      ])
+    });
+  });
+
+  it("returns indeterminate when receipt asset issuer does not match approved payment", async () => {
+    const client = successfulClient({
+      getReceipt: vi.fn(async () => receipt({ assetIssuer: "GOTHER" }))
+    });
+    const result = await execute(client);
+
+    expect(result).toMatchObject({
+      state: "indeterminate",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("Asset issuer mismatch")
+      ])
+    });
+  });
+
+  it("returns indeterminate when receipt network does not match approved payment", async () => {
+    const client = successfulClient({
+      getReceipt: vi.fn(async () => receipt({ network: "stellar:public" as never }))
+    });
+    const result = await execute(client);
+
+    expect(result).toMatchObject({
+      state: "indeterminate",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("Network mismatch")
+      ])
+    });
+  });
+
+  it("returns indeterminate when receipt resource ID does not match approved payment", async () => {
+    const client = successfulClient({
+      getReceipt: vi.fn(async () => receipt({ resourceId: "resource_forecast" }))
+    });
+    const result = await execute(client);
+
+    expect(result).toMatchObject({
+      state: "indeterminate",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("Resource ID mismatch")
+      ])
+    });
+  });
+
+  it("returns indeterminate when receipt payment attempt ID does not match verification", async () => {
+    const client = successfulClient({
+      getReceipt: vi.fn(async () => receipt({ paymentAttemptId: "attempt_2" }))
+    });
+    const result = await execute(client);
+
+    expect(result).toMatchObject({
+      state: "indeterminate",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("Payment attempt ID mismatch")
+      ])
+    });
+  });
+
+  it("returns indeterminate when receipt correlation ID does not match verification", async () => {
+    const client = successfulClient({
+      getReceipt: vi.fn(async () => receipt({ correlationId: "corr_2" }))
+    });
+    const result = await execute(client);
+
+    expect(result).toMatchObject({
+      state: "indeterminate",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("Correlation ID mismatch")
+      ])
+    });
+  });
+
+  it("returns indeterminate when receipt transaction hash does not match settlement", async () => {
+    const storage = memoryStorage();
+    const client = successfulClient({
+      getReceipt: vi.fn(async () => receipt({ transactionHash: "tx_2" }))
+    });
+
+    // First execute normally to establish transactionHash in recovery
+    const result = await createPaidFlowCoordinator().execute({
+      authorization: authorization(),
+      challenge: challenge(),
+      client,
+      fetchImpl: vi.fn(async () => Response.json({ ok: true })) as unknown as typeof fetch,
+      resourceId: "resource_weather",
+      storage
+    });
+
+    expect(result).toMatchObject({
+      state: "indeterminate",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("Transaction hash mismatch")
+      ])
+    });
+  });
+
   it("keeps all user-facing lifecycle labels distinct", () => {
     expect(new Set(Object.values(paidFlowStateLabels)).size).toBe(8);
   });

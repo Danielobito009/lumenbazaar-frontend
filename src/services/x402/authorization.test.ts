@@ -85,7 +85,7 @@ describe("Freighter x402 authorization", () => {
   });
 
   it("rejects a missing or invalid wallet signature", async () => {
-    await expectAuthorizationCode(wallet({ signedAuthEntry: null }), "SIGNATURE_INVALID");
+    await expectAuthorizationCode(wallet({ signedAuthEntry: null }), "WALLET_MALFORMED_SIGNATURE");
     await expect(
       authorizePaymentChallenge(challenge(), {
         connectWallet: async () => connection(),
@@ -96,6 +96,119 @@ describe("Freighter x402 authorization", () => {
         walletApi: wallet()
       })
     ).rejects.toMatchObject({ code: "SIGNATURE_INVALID" });
+  });
+
+  it("times out wallet signing after configured timeout duration", async () => {
+    const delayedWallet = {
+      ...wallet(),
+      signAuthEntry: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(() => {
+              resolve({
+                signedAuthEntry: "signed-auth-entry",
+                signerAddress: account
+              });
+            }, 2000); // Simulate slow response
+          })
+      )
+    };
+
+    await expect(
+      authorizePaymentChallenge(challenge(), {
+        connectWallet: async () => connection(),
+        createScheme: schemeCallingWallet,
+        now: () => 2_000,
+        signingTimeoutMs: 100, // 100ms timeout
+        walletApi: delayedWallet
+      })
+    ).rejects.toMatchObject({ code: "WALLET_SIGNING_TIMEOUT" });
+  });
+
+  it("allows successful signing within timeout window", async () => {
+    const walletApi = wallet();
+    const result = await authorizePaymentChallenge(challenge(), {
+      connectWallet: async () => connection(),
+      createScheme: schemeCallingWallet,
+      now: () => 2_000,
+      signingTimeoutMs: 5000, // 5 second timeout
+      walletApi
+    });
+
+    expect(result.account).toBe(account);
+    expect(walletApi.signAuthEntry).toHaveBeenCalled();
+  });
+
+  it("distinguishes between wallet rejection and timeout", async () => {
+    const rejectionError = await authorizePaymentChallenge(challenge(), {
+      connectWallet: async () => connection(),
+      createScheme: schemeCallingWallet,
+      now: () => 2_000,
+      walletApi: wallet({ signError: { message: "User declined" } })
+    }).catch((e) => e as AuthorizationError);
+
+    const timeoutError = await authorizePaymentChallenge(challenge(), {
+      connectWallet: async () => connection(),
+      createScheme: schemeCallingWallet,
+      now: () => 2_000,
+      signingTimeoutMs: 10,
+      walletApi: wallet({
+        signAuthEntry: vi.fn(
+          () =>
+            new Promise((resolve) => {
+              setTimeout(() => {
+                resolve({
+                  signedAuthEntry: "signed-auth-entry",
+                  signerAddress: account
+                });
+              }, 100);
+            })
+        )
+      })
+    }).catch((e) => e as AuthorizationError);
+
+    expect(rejectionError.code).toBe("WALLET_REJECTED");
+    expect(timeoutError.code).toBe("WALLET_SIGNING_TIMEOUT");
+  });
+
+  it("ensures focus can be safely retried after rejection without duplicate authorization", async () => {
+    let callCount = 0;
+    const trackedWallet = {
+      ...wallet(),
+      signAuthEntry: vi.fn(async () => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error("User declined");
+        }
+        return {
+          signedAuthEntry: "signed-auth-entry",
+          signerAddress: account
+        };
+      })
+    };
+
+    // First attempt: rejected
+    const firstAttempt = await authorizePaymentChallenge(challenge(), {
+      connectWallet: async () => connection(),
+      createScheme: schemeCallingWallet,
+      now: () => 2_000,
+      walletApi: { ...trackedWallet, signAuthEntry: vi.fn(async () => {
+        throw { error: { message: "User declined" } };
+      }) }
+    }).catch((e) => e as AuthorizationError);
+
+    expect(firstAttempt.code).toBe("WALLET_REJECTED");
+
+    // Second attempt: should succeed (simulating user retry)
+    const secondAttempt = await authorizePaymentChallenge(challenge(), {
+      connectWallet: async () => connection(),
+      createScheme: schemeCallingWallet,
+      now: () => 2_000,
+      walletApi: wallet()
+    });
+
+    expect(secondAttempt.account).toBe(account);
+    expect(secondAttempt.header).toBeDefined();
   });
 
   it("rejects expiration before connection and while the wallet prompt is open", async () => {
