@@ -66,7 +66,7 @@ function DemoPaymentPlayground() {
   const [paymentRequest, setPaymentRequest] = useState<PaymentPayload | null>(null);
   const [verification, setVerification] = useState<PaymentVerification | null>(null);
   const [settlement, setSettlement] = useState<Settlement | null>(null);
-  const [error, setError] = useState<{ code: string; message: string } | null>(null);
+  const [error, setError] = useState<{ code: string; message: string; retryable?: boolean } | null>(null);
   const [busy, setBusy] = useState<"verify" | "settle" | null>(null);
   const resource = useMemo<Resource>(
     () => demoResources.find((item) => item.id === selectedResourceId) ?? demoResources[0]!,
@@ -333,9 +333,14 @@ function DemoPaymentPlayground() {
                 <div className="rounded-md border border-red-200 bg-red-50 p-3">
                   <div className="flex items-start gap-2">
                     <AlertTriangle aria-hidden="true" className="mt-0.5 h-4 w-4 text-red-700" />
-                    <div>
+                    <div className="flex-1">
                       <Badge tone="danger">{error.code}</Badge>
                       <p className="mt-2 text-sm leading-6 text-red-800">{error.message}</p>
+                      {error.retryable ? (
+                        <p className="mt-2 text-xs text-red-700">This error is retryable. Focus returns to the payment control.</p>
+                      ) : (
+                        <p className="mt-2 text-xs text-red-700">This error requires user action before retry.</p>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -411,8 +416,20 @@ function normalizePlaygroundError(error: unknown) {
     title: "Payment request failed"
   });
 
+  // Determine if error is retryable based on error code
+  const retryableErrors = [
+    "WALLET_REJECTED",
+    "WALLET_TIMEOUT",
+    "WALLET_SIGNING_TIMEOUT",
+    "WALLET_UNAVAILABLE",
+    "SIGNATURE_INVALID",
+    "WALLET_MALFORMED_SIGNATURE"
+  ];
+  const isRetryable = retryableErrors.includes(state.code);
+
   return {
     code: state.code,
-    message: state.description
+    message: state.description,
+    retryable: isRetryable
   };
 }
